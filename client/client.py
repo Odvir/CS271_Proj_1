@@ -21,6 +21,7 @@ class Client:
         self.lamport_clock = LamportClock(port % 1000) #port % 1000 is the client_id
         self.request_queue = RequestQueue()  # Priority queue for Lamport mutex requests
         self.mutex_held = False  # Whether this client holds the mutex
+        self.mutex_request_handler = threading.Lock()  # New mutex to handle incoming mutex requests
         self.acks_count = 0  # Number of acknowledgements received from other client peers, as we maintain a connection to all
         self.real_connection_count = 0
         self.balance_table = BalanceTable({name: 10}) #starting out with a balance of 10$ (REQUIREMENT)
@@ -28,6 +29,7 @@ class Client:
     
     def request_mutex(self):
         """Request access to the critical section (mutex)."""
+        print(f"{self.name} is requesting the mutex")
         self.lamport_clock.increment()
         self.mutex_held = False
         # add my request to the queue that I HOLD
@@ -38,7 +40,6 @@ class Client:
             "sender": self.name,
         }
         self.network.broadcast_message(request_message)
-        time.sleep(3)
         self.ack_event.wait()
         self.mutex_held = True
         print(f"{self.name} has acquired the mutex")
@@ -55,15 +56,16 @@ class Client:
         release_message = {"type": "mutex_release", "lamport_time": self.lamport_clock.get_time(), "sender": self.name}
         self.network.broadcast_message(release_message)
 
-    def handle_transaction(self, operation):
+    def handle_transaction(self, operation, first_request=False):
         """Handles a transaction request."""
         try:
             # Request mutex before accessing the critical section
-            print(f"{self.name} is requesting the mutex to handle transaction {operation}")
-            self.request_mutex()
-
-            # Critical section: Validate and execute the transaction
+            # print(f"{self.name} is requesting the mutex to handle transaction {operation}")
             sender, receiver, amount = operation
+
+            self.request_mutex()
+            print(f"{self.name} has acquired the mutex to handle transaction {operation}")
+            # Critical section: Validate and execute the transaction
             self.balance_table.update_balance(sender, receiver, amount)
             self.blockchain.add_block(operation)
             print(f"Transaction SUCCESS: {sender} sent ${amount} to {receiver}")
@@ -72,12 +74,12 @@ class Client:
 
             # Broadcast the transaction to peers
             message = {"type": "transaction", "operation": operation, "lamport_time": self.lamport_clock.get_time(), "sender": self.name}
-            self.network.broadcast_message(message)
-        except ValueError as e:
-            print(f"Transaction FAILED: {e}")
-        finally:
             # Release the mutex after the transaction is complete
             self.release_mutex()
+            if first_request:
+                self.network.broadcast_message(message)
+        except ValueError as e:
+            print(f"Transaction FAILED: {e}")
 
     def start(self):
         # self.connect_to_peers()
@@ -100,51 +102,80 @@ class Client:
             try:
                 print(f"{self.name} connecting to {peer['name']} at {peer['ip']}:{peer['port']}")
                 self.network.add_connection(peer['name'], peer["ip"], peer["port"])
+                self.balance_table.update_init_balance(peer['name'], 10)
                 self.real_connection_count += 1
             except Exception as e:
                 print(f"{self.name} failed to connect to {peer['name']}: {e}")
 
     def print_balances(self):
         print(self.balance_table.get_balance(self.name))
+    
+    def print_whole_table(self):
+        print(self.balance_table.get_whole_table())
 
     def handle_msg(self, conn, addr):
         """Handles incoming messages from the network. If balance request, sends balance response.
         If transaction, processes the transaction by calling handle_transaction."""
         msg = self.network.receive_message(conn)
-        print(f"{self.name} received message: {addr}")
+        print(f"{self.name} received message: {msg}")
         if msg:
             if msg["type"] == "transaction":
+                print(f"{self.name} received transaction message")
+                sender, receiver, amount = msg["operation"]
                 received_clock, sender_id = msg["lamport_time"]
                 self.lamport_clock.sync(received_clock, sender_id)
                 self.handle_transaction(msg["operation"])
+                # else:
+                #     self.balance_table.update_balance(sender, receiver, amount)
+                #     print(f"{self.name} received ${amount} from {sender}")
             elif msg["type"] == "mutex_request":
                 # Add request to the queue and send ACK
-                lamport_time = msg["lamport_time"]
+                print(f"{self.name} received mutex request")
+                # Acquire the mutex_request_handler to ensure we handle one request at a time
                 sender = msg["sender"]
-                self.request_queue.add_request(lamport_time, sender)
-
-                # Send an ACK back to the requester
-                print(f"{self.name} received request from {sender}. Sending ACK...")
-                ack_message = {"type": "mutex_ack", "lamport_time": self.lamport_clock.get_time(), "sender": self.name}
-                self.network.send_message(sender, ack_message)
+                print(f"{self.name}: The mutex is currently held: {self.mutex_held}")
+                if not self.mutex_held:
+                    # Add request to the queue
+                    self.request_queue.add_request(self.lamport_clock.get_time(), sender)
+                    received_clock, sender_id = msg["lamport_time"]
+                    self.lamport_clock.sync(received_clock, sender_id)
+                    time.sleep(1)
+                    
+                    # Only send an ACK if it's the first request in the queue
+                    first_request = self.request_queue.peek_next_request()
+                    print(f"This is {self.name} and this is the first request in the queue: {first_request}, and this is the whole queue: {self.request_queue.queue}")
+                    if first_request and first_request[1] == sender:
+                        print(f"{self.name} sending ACK to {sender}")
+                        self.request_queue.get_next_request()
+                        self.lamport_clock.increment()
+                        ack_message = {"type": "mutex_ack", "lamport_time": self.lamport_clock.get_time(), "sender": self.name}
+                        self.mutex_held = True
+                        self.network.send_message(sender, ack_message)
+                        print("ACK sent by ", self.name)
+                    else:
+                        print(f"{self.name} skipping ACK for {sender}, request is not first in the queue.")
+                else:
+                    print(f"{self.name} is holding the mutex. Skipping ACK for {msg['sender']}.")
 
             elif msg["type"] == "mutex_ack":
                 # Decrement pending ACK count
                 self.acks_count += 1
-                print(f"{self.name} received ACK from {msg['sender']}. ACKs count: {self.acks_count}")
+                print(f"{self.name} received ACK from {msg['sender']}. ACKs count: {self.acks_count} out of {self.real_connection_count}")
                 if self.acks_count == self.real_connection_count:
                     # If all ACKs received, release the mutex
                     self.ack_event.set()
 
             elif msg["type"] == "mutex_release":
                 # Remove the releasing client's request from the queue
+                print(f"{self.name} received mutex release")
+                self.mutex_held = False
                 released_request = self.request_queue.get_next_request()
                 print(f"Request {released_request} has been processed")
 
             elif msg["type"] == "balance_request":
-                client_name = msg["client"]
-                balance = self.balance_table.get_balance(client_name)
+                sender = msg["sender"]
+                balance = self.balance_table.get_balance(self.name)
                 response = {"type": "balance_response", "balance": balance}
-                self.network.send_message(addr[0], addr[1], response)
+                self.network.send_message(sender, response)
         
 

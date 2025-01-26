@@ -9,7 +9,7 @@ class Network:
         self.id = port % 1000
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.bind((self.host, self.port))
-        self.socket.listen(4)  # Allows up to 4 connections, one more than needed to be safe
+        self.socket.listen(5)  # Allows up to 4 connections, one more than needed to be safe
         self.connections = {}  # Keep track of active connections {client_name: (conn, addr)}
     
     def add_connection(self, client_name, host, port):
@@ -35,8 +35,8 @@ class Network:
             # For simplicity, we're associating it with a unique client name or ID
             client_name = f"Client-{addr[1]}"  # Just an example, you can use an actual mapping
             self.connections[client_name] = (conn, addr)
-            threading.Thread(target=handler_function, args=(conn, addr)).start()
-            
+            threading.Thread(target=self.handle_client, args=(conn, addr, handler_function)).start()
+
     def send_message(self, client_name, message):
         """Send a message to a specific client identified by client_name."""
         if client_name not in self.connections:
@@ -49,6 +49,12 @@ class Network:
         except Exception as e:
             print(f"Failed to send message to {client_name} - {e}")
             self.close_connection(client_name)
+
+    def handle_client(self, conn, addr, handler_function):
+        """Handles communication with a specific client."""
+        while True:
+            msg = receive_message(conn)
+            handler_function(msg, conn, addr)
 
     def broadcast_message(self, message):
         """Sends a message to all active connections."""

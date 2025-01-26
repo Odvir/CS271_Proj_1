@@ -29,7 +29,6 @@ class LamportClock:
 
     def get_time(self):
         return (self.clock, self.process_id)
-    
     def __repr__(self):
         """
         Represent the LamportClock object for debugging purposes.

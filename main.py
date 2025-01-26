@@ -2,7 +2,6 @@ import json
 import threading
 import time
 from client.client import Client
-
 # Load configuration from the JSON file
 def load_config(config_file):
     with open(config_file, 'r') as file:
@@ -32,13 +31,13 @@ def main():
     # wait to ensure clients started
     time.sleep(1)
     print("Simulating transactions...")
-    clients["ClientA"].handle_transaction(("ClientA", "ClientB", 5))  # A -> B: $5
+    clients["ClientA"].handle_transaction(("ClientA", "ClientB", 5), True)  # A -> B: $5
 
     time.sleep(2)
     print("Printing balances...")
     for client in clients.values():
         print(f"{client.name}:")
-        client.print_balances()
+        client.print_whole_table()
 
 if __name__ == "__main__":
     main()
