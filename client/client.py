@@ -6,14 +6,36 @@ from client.request_queue import RequestQueue
 import threading
 import time
 
+def run_client(name, host, port, peers, first):
+        """
+        This function runs in its own process. It creates a single Client instance,
+        starts its server, connects to peers if 'first' is True, etc.
+        """
+        from client.client import Client  # or an absolute import
+
+        client = Client(name, host, port, peers, first)
+        client.start()  # This starts the client's network server thread, etc.
+
+        if name == "ClientA":
+            print("Simulating transaction from ClientA -> ClientB")
+            client.handle_transaction(("ClientA", "ClientB", 5), True)
+            time.sleep(2)
+            print("Final balances as seen by ClientA:")
+            client.print_whole_table()
+
+        # Keep this process alive
+        while True:
+            time.sleep(1)
+
 class Client:
     """Class to represent a client in the blockchain network.
     * Each client has a name, host, port, blockchain, network, lamport logical clock, and balance table.
     """
-    def __init__(self, name, host, port, peers):
+    def __init__(self, name, host, port, peers, first):
         self.name = name 
         self.host = host
         self.port = port
+        self.first = first
         self.peers = peers  # List of other clients' configurations
         self.blockchain = Blockchain()
         self.network = Network(host, port)
@@ -26,7 +48,8 @@ class Client:
         self.real_connection_count = 0
         self.balance_table = BalanceTable({name: 10}) #starting out with a balance of 10$ (REQUIREMENT)
         self.ack_event = threading.Event()
-    
+        self.mutex_release_event = threading.Event()
+
     def request_mutex(self):
         """Request access to the critical section (mutex)."""
         print(f"{self.name} is requesting the mutex")
@@ -58,12 +81,13 @@ class Client:
 
     def handle_transaction(self, operation, first_request=False):
         """Handles a transaction request."""
+        print(f"client name: {self.name} received operation: {operation}") 
         try:
             # Request mutex before accessing the critical section
             # print(f"{self.name} is requesting the mutex to handle transaction {operation}")
             sender, receiver, amount = operation
 
-            self.request_mutex()
+            # self.request_mutex()
             print(f"{self.name} has acquired the mutex to handle transaction {operation}")
             # Critical section: Validate and execute the transaction
             self.balance_table.update_balance(sender, receiver, amount)
@@ -75,7 +99,7 @@ class Client:
             # Broadcast the transaction to peers
             message = {"type": "transaction", "operation": operation, "lamport_time": self.lamport_clock.get_time(), "sender": self.name}
             # Release the mutex after the transaction is complete
-            self.release_mutex()
+            # self.release_mutex()
             if first_request:
                 self.network.broadcast_message(message)
         except ValueError as e:
@@ -113,11 +137,10 @@ class Client:
     def print_whole_table(self):
         print(self.balance_table.get_whole_table())
 
-    def handle_msg(self, conn, addr):
+    def handle_msg(self, conn, addr, msg):
         """Handles incoming messages from the network. If balance request, sends balance response.
         If transaction, processes the transaction by calling handle_transaction."""
-        msg = self.network.receive_message(conn)
-        print(f"{self.name} received message: {msg}")
+        print("print in handle_msg: ", threading.current_thread().name, conn,  flush=True) 
         if msg:
             if msg["type"] == "transaction":
                 print(f"{self.name} received transaction message")
@@ -147,11 +170,12 @@ class Client:
                     if first_request and first_request[1] == sender:
                         print(f"{self.name} sending ACK to {sender}")
                         self.request_queue.get_next_request()
-                        self.lamport_clock.increment()
+                        self.lamport_clock
                         ack_message = {"type": "mutex_ack", "lamport_time": self.lamport_clock.get_time(), "sender": self.name}
-                        self.mutex_held = True
                         self.network.send_message(sender, ack_message)
                         print("ACK sent by ", self.name)
+                        time.sleep(5)
+                        # self.mutex_release_event.wait()
                     else:
                         print(f"{self.name} skipping ACK for {sender}, request is not first in the queue.")
                 else:
@@ -170,6 +194,7 @@ class Client:
                 print(f"{self.name} received mutex release")
                 self.mutex_held = False
                 released_request = self.request_queue.get_next_request()
+                self.mutex_release_event.set()
                 print(f"Request {released_request} has been processed")
 
             elif msg["type"] == "balance_request":

@@ -11,12 +11,13 @@ class Network:
         self.socket.bind((self.host, self.port))
         self.socket.listen(5)  # Allows up to 4 connections, one more than needed to be safe
         self.connections = {}  # Keep track of active connections {client_name: (conn, addr)}
+        self.buffers = {} # Buffer for each client to store incoming messages
     
     def add_connection(self, client_name, host, port):
         """Establish a connection to a peer."""
         addr = (host, port)
         try:
-            if port > 6010:
+            if port > 7000:
                 print(f"Skipping connection to {host}:{port}")
                 return
             conn = socket.create_connection((host, port))
@@ -40,12 +41,13 @@ class Network:
     def send_message(self, client_name, message):
         """Send a message to a specific client identified by client_name."""
         if client_name not in self.connections:
+            print("current live connections: ", self.connections)
             print(f"No active connection to {client_name}")
             return
         conn, addr = self.connections[client_name]
         try:
-            conn.sendall(json.dumps(message).encode())
-            print(f"Message sent to {client_name} at {addr}")
+            conn.sendall(json.dumps(message).encode("utf-8") + b"\n")
+            print(f"Message {message} sent to {client_name} at {addr}")
         except Exception as e:
             print(f"Failed to send message to {client_name} - {e}")
             self.close_connection(client_name)
@@ -53,15 +55,19 @@ class Network:
     def handle_client(self, conn, addr, handler_function):
         """Handles communication with a specific client."""
         while True:
-            msg = receive_message(conn)
-            handler_function(msg, conn, addr)
+            msg = self.receive_message(conn)
+            if not msg:
+                print(f"Connection from {addr} closed")
+                break
+            handler_function(conn, addr, msg)
+        conn.close()
 
     def broadcast_message(self, message):
         """Sends a message to all active connections."""
         print(f"Broadcasting message from {message['sender']}")
         for client_name, (conn, addr) in self.connections.items():
             try:
-                conn.sendall(json.dumps(message).encode())
+                conn.sendall(json.dumps(message).encode("utf-8") + b"\n")
                 print(f"Message broadcast to {client_name} at {addr}")
             except BrokenPipeError:
                 print(f"Connection to {client_name} is broken, removing...")
@@ -69,13 +75,57 @@ class Network:
                 conn.close()
 
     def receive_message(self, conn):
-        """Receive a message from the network."""
+        """
+        Block until exactly one JSON message can be parsed from the connection,
+        or until the connection is closed (in which case return None).
+        """
+        # print("print in rec_msg: ", threading.current_thread().name, conn,  flush=True) 
+        if conn not in self.buffers:
+            self.buffers[conn] = b""
+
+        while True:
+            # First, see if there's already a complete JSON object in self.buffers[conn].
+            msg, leftover = self.try_parse_one_message(self.buffers[conn])
+            if msg is not None:
+                # Found one complete JSON object in the buffer
+                self.buffers[conn] = leftover  # store any leftover bytes
+                return msg
+
+            # No complete JSON message yet, so read more data from socket
+            chunk = conn.recv(1024)
+            if not chunk:
+                # Connection closed, no more data
+                return None
+
+            # Accumulate the newly-read data
+            self.buffers[conn] += chunk
+
+    def try_parse_one_message(self, buffer: bytes):
+        """
+        Attempt to parse EXACTLY one JSON message from the front of `buffer`.
+        Return (messageDict, leftoverBytes) if successful, or (None, buffer) if not enough data.
+
+        A simple approach: use newline-delimited JSON, or do a "look for one balanced JSON object".
+        """
+        # -- Option A: If using newline-delimited JSON:
+        if b"\n" not in buffer:
+            return None, buffer  # no complete JSON line yet
+
+        line, leftover = buffer.split(b"\n", 1)  # split on the first newline only
+        line = line.strip()
+        if not line:
+            # If the line is empty, skip and keep going
+            return None, leftover
+
+        # Attempt JSON parse
         try:
-            data = conn.recv(1024)
-            return json.loads(data.decode())
-        except ConnectionError as e:
-            print(f"Failed to receive message - {e}")
-            return None
+            msg_dict = json.loads(line.decode("utf-8"))
+            return msg_dict, leftover
+        except json.JSONDecodeError:
+            # Not a valid JSON string yet (or malformed).
+            # Possibly you want to handle errors or keep reading.
+            return None, buffer
+        
     def close_connection(self, client_name):
         """Closes a specific connection to a client."""
         if client_name in self.connections:
